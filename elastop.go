@@ -208,12 +208,106 @@ var (
 )
 
 var (
-	header       *tview.TextView
-	nodesPanel   *tview.TextView
-	rolesPanel   *tview.TextView
-	indicesPanel *tview.TextView
-	metricsPanel *tview.TextView
+	header              *tview.TextView
+	nodesPanelContainer *tview.Flex
+	rolesPanel          *tview.TextView
+	indicesPanel        *tview.TextView
+	metricsPanel        *tview.TextView
 )
+
+// MetricsHistory stores historical data points for sparklines
+type MetricsHistory struct {
+	CPU       []float64
+	Memory    []float64
+	Heap      []float64
+	QueryRate []float64
+	IndexRate []float64
+	MaxPoints int
+}
+
+var metricsHistory = &MetricsHistory{MaxPoints: 60}
+
+func (h *MetricsHistory) AddPoint(cpu, mem, heap, qRate, iRate float64) {
+	h.CPU = append(h.CPU, cpu)
+	h.Memory = append(h.Memory, mem)
+	h.Heap = append(h.Heap, heap)
+	h.QueryRate = append(h.QueryRate, qRate)
+	h.IndexRate = append(h.IndexRate, iRate)
+
+	// Trim to MaxPoints
+	if len(h.CPU) > h.MaxPoints {
+		h.CPU = h.CPU[1:]
+	}
+	if len(h.Memory) > h.MaxPoints {
+		h.Memory = h.Memory[1:]
+	}
+	if len(h.Heap) > h.MaxPoints {
+		h.Heap = h.Heap[1:]
+	}
+	if len(h.QueryRate) > h.MaxPoints {
+		h.QueryRate = h.QueryRate[1:]
+	}
+	if len(h.IndexRate) > h.MaxPoints {
+		h.IndexRate = h.IndexRate[1:]
+	}
+}
+
+// renderSparkline converts data points to ASCII sparkline characters
+func renderSparkline(data []float64, width int, color string) string {
+	if len(data) == 0 {
+		return strings.Repeat(" ", width)
+	}
+
+	blocks := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+
+	// Find min and max for scaling
+	minVal, maxVal := data[0], data[0]
+	for _, v := range data {
+		if v < minVal {
+			minVal = v
+		}
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+
+	// Avoid division by zero
+	valRange := maxVal - minVal
+	if valRange == 0 {
+		valRange = 1
+	}
+
+	// Take the last 'width' points or pad if fewer
+	startIdx := 0
+	if len(data) > width {
+		startIdx = len(data) - width
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("[%s]", color))
+
+	// Pad with spaces if we have fewer points than width
+	if len(data) < width {
+		for i := 0; i < width-len(data); i++ {
+			result.WriteRune(' ')
+		}
+	}
+
+	for i := startIdx; i < len(data); i++ {
+		// Normalize to 0-7 range
+		normalized := int((data[i] - minVal) / valRange * 7)
+		if normalized > 7 {
+			normalized = 7
+		}
+		if normalized < 0 {
+			normalized = 0
+		}
+		result.WriteRune(blocks[normalized])
+	}
+	result.WriteString("[white]")
+
+	return result.String()
+}
 
 type DataStreamResponse struct {
 	DataStreams []DataStream `json:"data_streams"`
@@ -424,6 +518,46 @@ func formatNodeRoles(roles []string) string {
 	return result
 }
 
+// formatNodeRolesCompact shows only active roles (compact display for cards)
+func formatNodeRolesCompact(roles []string) string {
+	roleMap := map[string]string{
+		"master":                "M",
+		"data":                  "D",
+		"data_content":          "C",
+		"data_hot":              "H",
+		"data_warm":             "W",
+		"data_cold":             "K",
+		"data_frozen":           "F",
+		"ingest":                "I",
+		"ml":                    "L",
+		"remote_cluster_client": "R",
+		"transform":             "T",
+		"voting_only":           "V",
+		"coordinating_only":     "O",
+	}
+
+	var result strings.Builder
+	for _, role := range roles {
+		if letter, ok := roleMap[role]; ok {
+			color := roleColors[role]
+			result.WriteString(fmt.Sprintf("[%s]%s", color, letter))
+		}
+	}
+	result.WriteString("[white]")
+	return result.String()
+}
+
+// truncateString truncates a string to maxLen, adding ".." if truncated
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 2 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-2] + ".."
+}
+
 func getHealthColor(health string) string {
 	switch health {
 	case "green":
@@ -470,7 +604,7 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics bool
 
 		// Add header and nodes panel
 		grid.AddItem(header, 0, 0, 1, 1, 0, 0, false)
-		grid.AddItem(nodesPanel, 1, 0, 1, 1, 0, 0, false)
+		grid.AddItem(nodesPanelContainer, 1, 0, 1, 1, 0, 0, false)
 		return
 	}
 
@@ -502,7 +636,7 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics bool
 
 	// Add nodes panel if visible, spanning all columns
 	if showNodes {
-		grid.AddItem(nodesPanel, 1, 0, 1, visiblePanels, 0, 0, false)
+		grid.AddItem(nodesPanelContainer, 1, 0, 1, visiblePanels, 0, 0, false)
 	}
 
 	// Add bottom panels in their respective positions
@@ -631,8 +765,8 @@ func main() {
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
 
-	nodesPanel = tview.NewTextView().
-		SetDynamicColors(true)
+	nodesPanelContainer = tview.NewFlex().
+		SetDirection(tview.FlexRow)
 
 	rolesPanel = tview.NewTextView(). // New panel for roles
 						SetDynamicColors(true)
@@ -648,7 +782,7 @@ func main() {
 
 	// Add panels to grid
 	grid.AddItem(header, 0, 0, 1, 3, 0, 0, false). // Header spans all columns
-							AddItem(nodesPanel, 1, 0, 1, 3, 0, 0, false).   // Nodes panel spans all columns
+							AddItem(nodesPanelContainer, 1, 0, 1, 3, 0, 0, false). // Nodes panel spans all columns
 							AddItem(rolesPanel, 2, 0, 1, 1, 0, 0, false).   // Roles panel in left column
 							AddItem(indicesPanel, 2, 1, 1, 1, 0, 0, false). // Indices panel in middle column
 							AddItem(metricsPanel, 2, 2, 1, 1, 0, 0, false)  // Metrics panel in right column
@@ -699,7 +833,7 @@ func main() {
 		// Get nodes info
 		var nodesInfo NodesInfo
 		if err := makeRequest("/_nodes", &nodesInfo); err != nil {
-			nodesPanel.SetText(fmt.Sprintf("[red]Error: %v", err))
+			header.SetText(fmt.Sprintf("[red]Error getting nodes info: %v", err))
 			return
 		}
 
@@ -770,7 +904,7 @@ func main() {
 		}[clusterStats.Status]
 
 		// Get max lengths after fetching node and index info
-		maxNodeNameLen, maxIndexNameLen, maxTransportLen, maxIngestedLen := getMaxLengths(nodesInfo, indicesStats)
+		maxNodeNameLen, maxIndexNameLen, _, maxIngestedLen := getMaxLengths(nodesInfo, indicesStats)
 
 		// Update header with dynamic padding
 		header.Clear()
@@ -791,94 +925,8 @@ func main() {
 			clusterStats.Nodes.Failed)
 		fmt.Fprintf(header, "[#666666]Press 2-5 to toggle panels, 'h' to toggle hidden indices, 'q' to quit[white]\n")
 
-		// Update nodes panel with dynamic width
-		nodesPanel.Clear()
-		fmt.Fprintf(nodesPanel, "[::b][#00ffff][[#ff5555]2[#00ffff]] Nodes Information[::-]\n\n")
-		fmt.Fprint(nodesPanel, getNodesPanelHeader(maxNodeNameLen, maxTransportLen))
-
-		// Create a sorted slice of node IDs based on node names
-		var nodeIDs []string
-		for id := range nodesInfo.Nodes {
-			nodeIDs = append(nodeIDs, id)
-		}
-		sort.Slice(nodeIDs, func(i, j int) bool {
-			return nodesInfo.Nodes[nodeIDs[i]].Name < nodesInfo.Nodes[nodeIDs[j]].Name
-		})
-
-		// Update node entries with dynamic width
-		for _, id := range nodeIDs {
-			nodeInfo := nodesInfo.Nodes[id]
-			nodeStats, exists := nodesStats.Nodes[id]
-			if !exists {
-				continue
-			}
-
-			// Calculate resource percentages and format memory values
-			cpuPercent := nodeStats.OS.CPU.Percent
-			memPercent := float64(nodeStats.OS.Memory.UsedInBytes) / float64(nodeStats.OS.Memory.TotalInBytes) * 100
-			heapPercent := float64(nodeStats.JVM.Memory.HeapUsedInBytes) / float64(nodeStats.JVM.Memory.HeapMaxInBytes) * 100
-
-			// Calculate disk usage - use the data path stats
-			diskTotal := int64(0)
-			diskAvailable := int64(0)
-			if len(nodeStats.FS.Data) > 0 {
-				// Use the first data path's stats - this is the Elasticsearch data directory
-				diskTotal = nodeStats.FS.Data[0].TotalInBytes
-				diskAvailable = nodeStats.FS.Data[0].AvailableInBytes
-			} else {
-				// Fallback to total stats if data path stats aren't available
-				diskTotal = nodeStats.FS.Total.TotalInBytes
-				diskAvailable = nodeStats.FS.Total.AvailableInBytes
-			}
-			diskUsed := diskTotal - diskAvailable
-			diskPercent := float64(diskUsed) / float64(diskTotal) * 100
-
-			versionColor := "yellow"
-			if compareVersions(nodeInfo.Version, latestVer) {
-				versionColor = "green"
-			}
-
-			// Add this request before the nodes panel update
-			var catNodesStats []CatNodesStats
-			if err := makeRequest("/_cat/nodes?format=json&h=name,load_1m", &catNodesStats); err != nil {
-				nodesPanel.SetText(fmt.Sprintf("[red]Error getting cat nodes stats: %v", err))
-				return
-			}
-
-			// Create a map for quick lookup of load averages by node name
-			nodeLoads := make(map[string]string)
-			for _, node := range catNodesStats {
-				nodeLoads[node.Name] = node.Load1m
-			}
-
-			fmt.Fprintf(nodesPanel, "[#5555ff]%-*s [white] [#444444]│[white] %s [#444444]│[white] [white]%*s[white] [#444444]│[white] [%s]%-7s[white] [#444444]│[white] [%s]%3d%% [#444444](%d)[white] [#444444]│[white] %4s / %4s [%s]%3d%%[white] [#444444]│[white] %4s / %4s [%s]%3d%%[white] [#444444]│[white] %4s / %4s [%s]%3d%%[white] [#444444]│[white] %-8s[white] [#444444]│[white] %s [#bd93f9]%s[white] [#444444](%s)[white]\n",
-				maxNodeNameLen,
-				nodeInfo.Name,
-				formatNodeRoles(nodeInfo.Roles),
-				maxTransportLen,
-				nodeInfo.TransportAddress,
-				versionColor,
-				nodeInfo.Version,
-				getPercentageColor(float64(cpuPercent)),
-				cpuPercent,
-				nodeInfo.OS.AvailableProcessors,
-				formatResourceSize(nodeStats.OS.Memory.UsedInBytes),
-				formatResourceSize(nodeStats.OS.Memory.TotalInBytes),
-				getPercentageColor(memPercent),
-				int(memPercent),
-				formatResourceSize(nodeStats.JVM.Memory.HeapUsedInBytes),
-				formatResourceSize(nodeStats.JVM.Memory.HeapMaxInBytes),
-				getPercentageColor(heapPercent),
-				int(heapPercent),
-				formatResourceSize(diskUsed),
-				formatResourceSize(diskTotal),
-				getPercentageColor(diskPercent),
-				int(diskPercent),
-				formatUptime(nodeStats.JVM.UptimeInMillis),
-				nodeInfo.OS.PrettyName,
-				nodeInfo.OS.Version,
-				nodeInfo.OS.Arch)
-		}
+		// Update nodes panel with card-based layout
+		updateNodesPanel(nodesPanelContainer, nodesInfo, nodesStats, latestVer, app)
 
 		// Get data streams info
 		var dataStreamResp DataStreamResponse
@@ -1047,107 +1095,100 @@ func main() {
 			clusterHealth.InitializingShards,
 			clusterHealth.UnassignedShards)
 
-		// Update metrics panel
-		metricsPanel.Clear()
-		fmt.Fprintf(metricsPanel, "[::b][#00ffff][[#ff5555]5[#00ffff]] Cluster Metrics[::-]\n\n")
-
-		// Define metrics keys with proper grouping
-		metricKeys := []string{
-			// System metrics
-			"CPU",
-			"Memory",
-			"Heap",
-			"Disk",
-
-			// Network metrics
-			"Network TX",
-			"Network RX",
-			"HTTP Connections",
-
-			// Performance metrics
-			"Query Rate",
-			"Index Rate",
-
-			// Miscellaneous
-			"Snapshots",
-		}
-
-		// Find the longest key for proper alignment
-		maxKeyLength := 0
-		for _, key := range metricKeys {
-			if len(key) > maxKeyLength {
-				maxKeyLength = len(key)
-			}
-		}
-
-		// Add padding for better visual separation
-		maxKeyLength += 2
-
-		// Helper function for metric lines with proper alignment
-		formatMetric := func(name string, value string) string {
-			return fmt.Sprintf("[#00ffff]%-*s[white] %s\n", maxKeyLength, name+":", value)
-		}
-
-		// CPU metrics
+		// Calculate metrics for display and history
 		totalProcessors := 0
 		for _, node := range nodesInfo.Nodes {
 			totalProcessors += node.OS.AvailableProcessors
 		}
 		cpuPercent := float64(clusterStats.Process.CPU.Percent)
-		fmt.Fprint(metricsPanel, formatMetric("CPU", fmt.Sprintf("%7.1f%% [#444444](%d processors)[white]", cpuPercent, totalProcessors)))
 
-		// Disk metrics
 		diskUsed := getTotalSize(nodesStats)
 		diskTotal := getTotalDiskSpace(nodesStats)
 		diskPercent := float64(diskUsed) / float64(diskTotal) * 100
-		fmt.Fprint(metricsPanel, formatMetric("Disk", fmt.Sprintf("%8s / %8s [%s]%5.1f%%[white]",
-			bytesToHuman(diskUsed),
-			bytesToHuman(diskTotal),
-			getPercentageColor(diskPercent),
-			diskPercent)))
 
-		// Calculate heap and memory totals
 		var (
 			totalHeapUsed    int64
 			totalHeapMax     int64
 			totalMemoryUsed  int64
 			totalMemoryTotal int64
 		)
-
 		for _, node := range nodesStats.Nodes {
 			totalHeapUsed += node.JVM.Memory.HeapUsedInBytes
 			totalHeapMax += node.JVM.Memory.HeapMaxInBytes
 			totalMemoryUsed += node.OS.Memory.UsedInBytes
 			totalMemoryTotal += node.OS.Memory.TotalInBytes
 		}
-
-		// Heap metrics
 		heapPercent := float64(totalHeapUsed) / float64(totalHeapMax) * 100
-		fmt.Fprint(metricsPanel, formatMetric("Heap", fmt.Sprintf("%8s / %8s [%s]%5.1f%%[white]",
-			bytesToHuman(totalHeapUsed),
-			bytesToHuman(totalHeapMax),
-			getPercentageColor(heapPercent),
-			heapPercent)))
-
-		// Memory metrics
 		memoryPercent := float64(totalMemoryUsed) / float64(totalMemoryTotal) * 100
-		fmt.Fprint(metricsPanel, formatMetric("Memory", fmt.Sprintf("%8s / %8s [%s]%5.1f%%[white]",
-			bytesToHuman(totalMemoryUsed),
-			bytesToHuman(totalMemoryTotal),
-			getPercentageColor(memoryPercent),
-			memoryPercent)))
 
-		// Network metrics
-		fmt.Fprint(metricsPanel, formatMetric("Network TX", fmt.Sprintf(" %7s", bytesToHuman(getTotalNetworkTX(nodesStats)))))
-		fmt.Fprint(metricsPanel, formatMetric("Network RX", fmt.Sprintf(" %7s", bytesToHuman(getTotalNetworkRX(nodesStats)))))
+		// Add data points to history
+		metricsHistory.AddPoint(cpuPercent, memoryPercent, heapPercent, queryRate, indexRate)
 
-		// HTTP Connections and Shard metrics - right aligned to match Network RX 'G'
-		fmt.Fprint(metricsPanel, formatMetric("HTTP Connections", fmt.Sprintf("%8s", formatNumber(int(getTotalHTTPConnections(nodesStats))))))
-		fmt.Fprint(metricsPanel, formatMetric("Query Rate", fmt.Sprintf("%6s/s", formatNumber(int(queryRate)))))
-		fmt.Fprint(metricsPanel, formatMetric("Index Rate", fmt.Sprintf("%6s/s", formatNumber(int(indexRate)))))
+		// Rebuild metrics panel with ASCII sparklines
+		metricsPanel.Clear()
+		metricsPanel.SetBorder(true).SetTitle(" [5] Cluster Metrics ")
 
-		// Snapshots
-		fmt.Fprint(metricsPanel, formatMetric("Snapshots", fmt.Sprintf("%8s", formatNumber(clusterStats.Snapshots.Count))))
+		// Calculate available width for sparklines
+		_, _, metricsPanelWidth, _ := metricsPanel.GetInnerRect()
+		labelWidth := 28 // approximate width of label + value portion
+		sparklineWidth := metricsPanelWidth - labelWidth
+		if sparklineWidth < 5 {
+			sparklineWidth = 0 // hide sparklines if too narrow
+		} else if sparklineWidth > 30 {
+			sparklineWidth = 30 // cap at reasonable max
+		}
+
+		// Helper to conditionally add sparkline
+		addSparkline := func(data []float64, color string) string {
+			if sparklineWidth > 0 {
+				return " " + renderSparkline(data, sparklineWidth, color)
+			}
+			return ""
+		}
+
+		// CPU with sparkline
+		fmt.Fprintf(metricsPanel, "[#00ffff]CPU:[white]      [%s]%5.1f%%[white] (%d proc)%s\n",
+			getPercentageColor(cpuPercent), cpuPercent, totalProcessors,
+			addSparkline(metricsHistory.CPU, "green"))
+
+		// Memory with sparkline
+		fmt.Fprintf(metricsPanel, "[#00ffff]Memory:[white]   %s / %s [%s]%3.0f%%[white]%s\n",
+			bytesToHuman(totalMemoryUsed), bytesToHuman(totalMemoryTotal),
+			getPercentageColor(memoryPercent), memoryPercent,
+			addSparkline(metricsHistory.Memory, "#00ffff"))
+
+		// Heap with sparkline
+		fmt.Fprintf(metricsPanel, "[#00ffff]Heap:[white]     %s / %s [%s]%3.0f%%[white]%s\n",
+			bytesToHuman(totalHeapUsed), bytesToHuman(totalHeapMax),
+			getPercentageColor(heapPercent), heapPercent,
+			addSparkline(metricsHistory.Heap, "yellow"))
+
+		// Disk (no sparkline)
+		fmt.Fprintf(metricsPanel, "[#00ffff]Disk:[white]     %s / %s [%s]%3.0f%%[white]\n",
+			bytesToHuman(diskUsed), bytesToHuman(diskTotal),
+			getPercentageColor(diskPercent), diskPercent)
+
+		// Network TX/RX (no sparkline)
+		fmt.Fprintf(metricsPanel, "[#00ffff]Net TX/RX:[white] %s / %s\n",
+			bytesToHuman(getTotalNetworkTX(nodesStats)), bytesToHuman(getTotalNetworkRX(nodesStats)))
+
+		// HTTP Connections (no sparkline)
+		fmt.Fprintf(metricsPanel, "[#00ffff]HTTP Conn:[white] %s\n",
+			formatNumber(int(getTotalHTTPConnections(nodesStats))))
+
+		// Query Rate with sparkline
+		fmt.Fprintf(metricsPanel, "[#00ffff]Query:[white]    %s/s%s\n",
+			formatNumber(int(queryRate)),
+			addSparkline(metricsHistory.QueryRate, "#50fa7b"))
+
+		// Index Rate with sparkline
+		fmt.Fprintf(metricsPanel, "[#00ffff]Index:[white]    %s/s%s\n",
+			formatNumber(int(indexRate)),
+			addSparkline(metricsHistory.IndexRate, "#ff79c6"))
+
+		// Snapshots (no sparkline)
+		fmt.Fprintf(metricsPanel, "[#00ffff]Snapshots:[white] %s\n",
+			formatNumber(clusterStats.Snapshots.Count))
 
 		if showRoles {
 			updateRolesPanel(rolesPanel, nodesInfo)
@@ -1446,4 +1487,189 @@ func formatResourceSize(bytes int64) string {
 	}
 
 	return fmt.Sprintf("%3d%s", int(val), units[exp])
+}
+
+// NodeCardData holds the data needed to create a node card
+type NodeCardData struct {
+	Name             string
+	TransportAddress string
+	Version          string
+	Roles            []string
+	CPUPercent       int
+	AvailableProcs   int
+	MemUsed          int64
+	MemTotal         int64
+	HeapUsed         int64
+	HeapMax          int64
+	DiskUsed         int64
+	DiskTotal        int64
+	UptimeMillis     int64
+	OSPrettyName     string
+}
+
+// createNodeCard creates a single node card with all node information
+func createNodeCard(data NodeCardData, latestVer string) *tview.TextView {
+	card := tview.NewTextView().SetDynamicColors(true)
+	card.SetBorder(true).SetTitle(" " + data.Name + " ").SetTitleColor(tcell.GetColor("#ff5555"))
+	card.SetBorderColor(tcell.GetColor("#ff5555"))
+
+	// Calculate percentages
+	memPercent := float64(0)
+	if data.MemTotal > 0 {
+		memPercent = float64(data.MemUsed) / float64(data.MemTotal) * 100
+	}
+	heapPercent := float64(0)
+	if data.HeapMax > 0 {
+		heapPercent = float64(data.HeapUsed) / float64(data.HeapMax) * 100
+	}
+	diskPercent := float64(0)
+	if data.DiskTotal > 0 {
+		diskPercent = float64(data.DiskUsed) / float64(data.DiskTotal) * 100
+	}
+
+	// Version color
+	versionColor := "yellow"
+	if compareVersions(data.Version, latestVer) {
+		versionColor = "green"
+	}
+
+	// Build card content (7 lines)
+	// Line 1: Roles, Version, Transport Address
+	fmt.Fprintf(card, "%s [%s]%s[white] %s\n",
+		formatNodeRolesCompact(data.Roles),
+		versionColor, data.Version,
+		data.TransportAddress)
+
+	// Line 2: CPU
+	fmt.Fprintf(card, "[#00ffff]CPU:[white]    [%s]%3d%%[white] (%d cores)\n",
+		getPercentageColor(float64(data.CPUPercent)), data.CPUPercent, data.AvailableProcs)
+
+	// Line 3: Memory
+	fmt.Fprintf(card, "[#00ffff]Memory:[white] %4s / %4s [%s]%3d%%[white]\n",
+		formatResourceSize(data.MemUsed),
+		formatResourceSize(data.MemTotal),
+		getPercentageColor(memPercent), int(memPercent))
+
+	// Line 4: Heap
+	fmt.Fprintf(card, "[#00ffff]Heap:[white]   %4s / %4s [%s]%3d%%[white]\n",
+		formatResourceSize(data.HeapUsed),
+		formatResourceSize(data.HeapMax),
+		getPercentageColor(heapPercent), int(heapPercent))
+
+	// Line 5: Disk
+	fmt.Fprintf(card, "[#00ffff]Disk:[white]   %4s / %4s [%s]%3d%%[white]\n",
+		formatResourceSize(data.DiskUsed),
+		formatResourceSize(data.DiskTotal),
+		getPercentageColor(diskPercent), int(diskPercent))
+
+	// Line 6: Uptime
+	fmt.Fprintf(card, "[#00ffff]Uptime:[white] %s\n",
+		formatUptime(data.UptimeMillis))
+
+	// Line 7: OS
+	fmt.Fprintf(card, "[#00ffff]OS:[white]     [#bd93f9]%s[white]\n",
+		data.OSPrettyName)
+
+	return card
+}
+
+// updateNodesPanel updates the nodes panel with card-based layout
+func updateNodesPanel(
+	container *tview.Flex,
+	nodesInfo NodesInfo,
+	nodesStats NodesStats,
+	latestVer string,
+	app *tview.Application,
+) {
+	container.Clear()
+
+	// Add title row
+	titleRow := tview.NewFlex().SetDirection(tview.FlexColumn)
+	title := tview.NewTextView().SetDynamicColors(true)
+	fmt.Fprintf(title, "[::b][#00ffff][[#ff5555]2[#00ffff]] Nodes Information[::-]")
+	titleRow.AddItem(title, 0, 1, false)
+	container.AddItem(titleRow, 1, 0, false)
+
+	// Sort nodes by name
+	var nodeIDs []string
+	for id := range nodesInfo.Nodes {
+		nodeIDs = append(nodeIDs, id)
+	}
+	sort.Slice(nodeIDs, func(i, j int) bool {
+		return nodesInfo.Nodes[nodeIDs[i]].Name < nodesInfo.Nodes[nodeIDs[j]].Name
+	})
+
+	// Calculate cards per row based on container width
+	// Card dimensions: min width ~40 chars, height 9 lines (7 content + 2 border)
+	const cardMinWidth = 40
+	const cardHeight = 9
+
+	_, _, width, _ := container.GetRect()
+	if width <= 0 {
+		width = 120 // default
+	}
+
+	cardsPerRow := width / cardMinWidth
+	if cardsPerRow < 1 {
+		cardsPerRow = 1
+	}
+
+	// Limit cards per row to total node count for better distribution
+	nodeCount := len(nodeIDs)
+	if cardsPerRow > nodeCount {
+		cardsPerRow = nodeCount
+	}
+
+	// Create cards and arrange in rows
+	var currentRow *tview.Flex
+	cardCount := 0
+
+	for _, id := range nodeIDs {
+		nodeInfo := nodesInfo.Nodes[id]
+		nodeStatsData, exists := nodesStats.Nodes[id]
+		if !exists {
+			continue
+		}
+
+		// Calculate disk usage
+		diskTotal := int64(0)
+		diskAvailable := int64(0)
+		if len(nodeStatsData.FS.Data) > 0 {
+			diskTotal = nodeStatsData.FS.Data[0].TotalInBytes
+			diskAvailable = nodeStatsData.FS.Data[0].AvailableInBytes
+		} else {
+			diskTotal = nodeStatsData.FS.Total.TotalInBytes
+			diskAvailable = nodeStatsData.FS.Total.AvailableInBytes
+		}
+		diskUsed := diskTotal - diskAvailable
+
+		// Build card data
+		cardData := NodeCardData{
+			Name:             nodeInfo.Name,
+			TransportAddress: nodeInfo.TransportAddress,
+			Version:          nodeInfo.Version,
+			Roles:            nodeInfo.Roles,
+			CPUPercent:       nodeStatsData.OS.CPU.Percent,
+			AvailableProcs:   nodeInfo.OS.AvailableProcessors,
+			MemUsed:          nodeStatsData.OS.Memory.UsedInBytes,
+			MemTotal:         nodeStatsData.OS.Memory.TotalInBytes,
+			HeapUsed:         nodeStatsData.JVM.Memory.HeapUsedInBytes,
+			HeapMax:          nodeStatsData.JVM.Memory.HeapMaxInBytes,
+			DiskUsed:         diskUsed,
+			DiskTotal:        diskTotal,
+			UptimeMillis:     nodeStatsData.JVM.UptimeInMillis,
+			OSPrettyName:     nodeInfo.OS.PrettyName,
+		}
+
+		// Start a new row if needed
+		if cardCount%cardsPerRow == 0 {
+			currentRow = tview.NewFlex().SetDirection(tview.FlexColumn)
+			container.AddItem(currentRow, cardHeight, 0, false)
+		}
+
+		// Create and add card - uses proportional width (0, 1) so cards expand to fill row
+		card := createNodeCard(cardData, latestVer)
+		currentRow.AddItem(card, 0, 1, false)
+		cardCount++
+	}
 }
