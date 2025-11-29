@@ -1128,67 +1128,94 @@ func main() {
 		metricsPanel.Clear()
 		metricsPanel.SetBorder(true).SetTitle(" [5] Cluster Metrics ")
 
-		// Calculate available width for sparklines
+		// Calculate available width for sparklines and centering
 		_, _, metricsPanelWidth, _ := metricsPanel.GetInnerRect()
-		labelWidth := 28 // approximate width of label + value portion
-		sparklineWidth := metricsPanelWidth - labelWidth
+		labelValueWidth := 28 // approximate width of label + value portion
+		sparklineWidth := metricsPanelWidth - labelValueWidth
 		if sparklineWidth < 5 {
 			sparklineWidth = 0 // hide sparklines if too narrow
 		} else if sparklineWidth > 30 {
 			sparklineWidth = 30 // cap at reasonable max
 		}
 
-		// Helper to conditionally add sparkline
-		addSparkline := func(data []float64, color string) string {
-			if sparklineWidth > 0 {
-				return " " + renderSparkline(data, sparklineWidth, color)
+		// Fixed width for the label+value portion (before sparkline)
+		fixedLabelValueWidth := 28
+
+		// Helper to format a metric line with fixed width and optional sparkline
+		formatMetricLine := func(label, value string, data []float64, color string) string {
+			// Remove tview color tags for length calculation
+			inTag := false
+			visibleLen := 0
+			for _, r := range value {
+				if r == '[' {
+					inTag = true
+				} else if r == ']' && inTag {
+					inTag = false
+				} else if !inTag {
+					visibleLen++
+				}
 			}
-			return ""
+
+			// Calculate padding needed after value to reach fixed width
+			labelLen := len(label) + 1 // +1 for colon
+			valuePadding := fixedLabelValueWidth - labelLen - visibleLen
+			if valuePadding < 1 {
+				valuePadding = 1
+			}
+
+			line := fmt.Sprintf("[#00ffff]%s:[white]%s%s",
+				label, strings.Repeat(" ", valuePadding), value)
+
+			// Add sparkline if we have data and width
+			if sparklineWidth > 0 && data != nil {
+				line += " " + renderSparkline(data, sparklineWidth, color)
+			}
+
+			return line + "\n"
 		}
 
 		// CPU with sparkline
-		fmt.Fprintf(metricsPanel, "[#00ffff]CPU:[white]      [%s]%5.1f%%[white] (%d proc)%s\n",
-			getPercentageColor(cpuPercent), cpuPercent, totalProcessors,
-			addSparkline(metricsHistory.CPU, "green"))
+		cpuValue := fmt.Sprintf("[%s]%5.1f%%[white] (%d proc)", getPercentageColor(cpuPercent), cpuPercent, totalProcessors)
+		fmt.Fprint(metricsPanel, formatMetricLine("CPU", cpuValue, metricsHistory.CPU, "green"))
 
 		// Memory with sparkline
-		fmt.Fprintf(metricsPanel, "[#00ffff]Memory:[white]   %s / %s [%s]%3.0f%%[white]%s\n",
+		memValue := fmt.Sprintf("%s / %s [%s]%3.0f%%[white]",
 			bytesToHuman(totalMemoryUsed), bytesToHuman(totalMemoryTotal),
-			getPercentageColor(memoryPercent), memoryPercent,
-			addSparkline(metricsHistory.Memory, "#00ffff"))
+			getPercentageColor(memoryPercent), memoryPercent)
+		fmt.Fprint(metricsPanel, formatMetricLine("Memory", memValue, metricsHistory.Memory, "#00ffff"))
 
 		// Heap with sparkline
-		fmt.Fprintf(metricsPanel, "[#00ffff]Heap:[white]     %s / %s [%s]%3.0f%%[white]%s\n",
+		heapValue := fmt.Sprintf("%s / %s [%s]%3.0f%%[white]",
 			bytesToHuman(totalHeapUsed), bytesToHuman(totalHeapMax),
-			getPercentageColor(heapPercent), heapPercent,
-			addSparkline(metricsHistory.Heap, "yellow"))
+			getPercentageColor(heapPercent), heapPercent)
+		fmt.Fprint(metricsPanel, formatMetricLine("Heap", heapValue, metricsHistory.Heap, "yellow"))
 
 		// Disk (no sparkline)
-		fmt.Fprintf(metricsPanel, "[#00ffff]Disk:[white]     %s / %s [%s]%3.0f%%[white]\n",
+		diskValue := fmt.Sprintf("%s / %s [%s]%3.0f%%[white]",
 			bytesToHuman(diskUsed), bytesToHuman(diskTotal),
 			getPercentageColor(diskPercent), diskPercent)
+		fmt.Fprint(metricsPanel, formatMetricLine("Disk", diskValue, nil, ""))
 
 		// Network TX/RX (no sparkline)
-		fmt.Fprintf(metricsPanel, "[#00ffff]Net TX/RX:[white] %s / %s\n",
+		netValue := fmt.Sprintf("%s / %s",
 			bytesToHuman(getTotalNetworkTX(nodesStats)), bytesToHuman(getTotalNetworkRX(nodesStats)))
+		fmt.Fprint(metricsPanel, formatMetricLine("Net TX/RX", netValue, nil, ""))
 
 		// HTTP Connections (no sparkline)
-		fmt.Fprintf(metricsPanel, "[#00ffff]HTTP Conn:[white] %s\n",
-			formatNumber(int(getTotalHTTPConnections(nodesStats))))
+		httpValue := formatNumber(int(getTotalHTTPConnections(nodesStats)))
+		fmt.Fprint(metricsPanel, formatMetricLine("HTTP Conn", httpValue, nil, ""))
 
 		// Query Rate with sparkline
-		fmt.Fprintf(metricsPanel, "[#00ffff]Query:[white]    %s/s%s\n",
-			formatNumber(int(queryRate)),
-			addSparkline(metricsHistory.QueryRate, "#50fa7b"))
+		queryValue := fmt.Sprintf("%s/s", formatNumber(int(queryRate)))
+		fmt.Fprint(metricsPanel, formatMetricLine("Query", queryValue, metricsHistory.QueryRate, "#50fa7b"))
 
 		// Index Rate with sparkline
-		fmt.Fprintf(metricsPanel, "[#00ffff]Index:[white]    %s/s%s\n",
-			formatNumber(int(indexRate)),
-			addSparkline(metricsHistory.IndexRate, "#ff79c6"))
+		indexValue := fmt.Sprintf("%s/s", formatNumber(int(indexRate)))
+		fmt.Fprint(metricsPanel, formatMetricLine("Index", indexValue, metricsHistory.IndexRate, "#ff79c6"))
 
 		// Snapshots (no sparkline)
-		fmt.Fprintf(metricsPanel, "[#00ffff]Snapshots:[white] %s\n",
-			formatNumber(clusterStats.Snapshots.Count))
+		snapshotValue := formatNumber(clusterStats.Snapshots.Count)
+		fmt.Fprint(metricsPanel, formatMetricLine("Snapshots", snapshotValue, nil, ""))
 
 		if showRoles {
 			updateRolesPanel(rolesPanel, nodesInfo)
