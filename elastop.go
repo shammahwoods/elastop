@@ -1126,7 +1126,7 @@ func main() {
 
 		// Rebuild metrics panel with ASCII sparklines
 		metricsPanel.Clear()
-		metricsPanel.SetBorder(true).SetTitle(" [5] Cluster Metrics ")
+		fmt.Fprintf(metricsPanel, "[::b][#00ffff][[#ff5555]5[#00ffff]] Cluster Metrics[::-]\n\n")
 
 		// Calculate available width for sparklines and centering
 		_, _, metricsPanelWidth, _ := metricsPanel.GetInnerRect()
