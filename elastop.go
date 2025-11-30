@@ -221,9 +221,6 @@ type SecurityAlerts struct {
 										Type string `json:"type"`
 									} `json:"os"`
 								} `json:"host"`
-								User struct {
-									Name string `json:"name"`
-								} `json:"user"`
 							} `json:"_source"`
 						} `json:"hits"`
 					} `json:"hits"`
@@ -234,25 +231,24 @@ type SecurityAlerts struct {
 						DocCount int    `json:"doc_count"`
 					} `json:"buckets"`
 				} `json:"by_severity"`
+				ByUser struct {
+					Buckets []struct {
+						Key      string `json:"key"`
+						DocCount int    `json:"doc_count"`
+					} `json:"buckets"`
+				} `json:"by_user"`
 			} `json:"buckets"`
 		} `json:"by_host"`
 		ByRule struct {
 			Buckets []struct {
-				Key      string `json:"key"`
-				DocCount int    `json:"doc_count"`
-				RuleInfo struct {
-					Hits struct {
-						Hits []struct {
-							Source struct {
-								Kibana struct {
-									Alert struct {
-										Severity string `json:"severity"`
-									} `json:"alert"`
-								} `json:"kibana"`
-							} `json:"_source"`
-						} `json:"hits"`
-					} `json:"hits"`
-				} `json:"rule_info"`
+				Key          string `json:"key"`
+				DocCount     int    `json:"doc_count"`
+				RuleSeverity struct {
+					Buckets []struct {
+						Key      string `json:"key"`
+						DocCount int    `json:"doc_count"`
+					} `json:"buckets"`
+				} `json:"rule_severity"`
 			} `json:"buckets"`
 		} `json:"by_rule"`
 	} `json:"aggregations"`
@@ -1438,22 +1434,22 @@ func main() {
 							"host_info": {
 								"top_hits": {
 									"size": 1,
-									"_source": ["host.os.type", "user.name"]
+									"_source": ["host.os.type"]
 								}
 							},
 							"by_severity": {
 								"terms": { "field": "kibana.alert.severity", "size": 10 }
+							},
+							"by_user": {
+								"terms": { "field": "user.name", "size": 5 }
 							}
 						}
 					},
 					"by_rule": {
 						"terms": { "field": "kibana.alert.rule.name", "size": 5 },
 						"aggs": {
-							"rule_info": {
-								"top_hits": {
-									"size": 1,
-									"_source": ["kibana.alert.severity"]
-								}
+							"rule_severity": {
+								"terms": { "field": "kibana.alert.severity", "size": 1 }
 							}
 						}
 					}
@@ -2008,13 +2004,20 @@ func updateSecurityPanel(panel *tview.TextView, alerts *SecurityAlerts) bool {
 			user:           "-",
 			severityCounts: make(map[string]int),
 		}
+		// Get OS from host_info top_hits
 		if len(bucket.HostInfo.Hits.Hits) > 0 {
 			hit := bucket.HostInfo.Hits.Hits[0]
 			if hit.Source.Host.OS.Type != "" {
 				h.os = hit.Source.Host.OS.Type
 			}
-			if hit.Source.User.Name != "" {
-				h.user = hit.Source.User.Name
+		}
+		// Get user from by_user aggregation (shows most common user, or count if multiple)
+		if len(bucket.ByUser.Buckets) > 0 {
+			if len(bucket.ByUser.Buckets) == 1 {
+				h.user = bucket.ByUser.Buckets[0].Key
+			} else {
+				// Multiple users - show top user with count indicator
+				h.user = fmt.Sprintf("%s +%d", bucket.ByUser.Buckets[0].Key, len(bucket.ByUser.Buckets)-1)
 			}
 		}
 		// Get severity counts for this host
@@ -2050,11 +2053,9 @@ func updateSecurityPanel(panel *tview.TextView, alerts *SecurityAlerts) bool {
 			count:    bucket.DocCount,
 			severity: "low", // default
 		}
-		// Get severity from rule_info
-		if len(bucket.RuleInfo.Hits.Hits) > 0 {
-			if sev := bucket.RuleInfo.Hits.Hits[0].Source.Kibana.Alert.Severity; sev != "" {
-				r.severity = sev
-			}
+		// Get severity from rule_severity aggregation (first bucket = most common severity for this rule)
+		if len(bucket.RuleSeverity.Buckets) > 0 {
+			r.severity = bucket.RuleSeverity.Buckets[0].Key
 		}
 		if len(r.name) > 42 {
 			r.name = r.name[:39] + "..."
