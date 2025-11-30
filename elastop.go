@@ -211,7 +211,9 @@ var (
 	header              *tview.TextView
 	nodesPanelContainer *tview.Flex
 	rolesPanel          *tview.TextView
-	indicesPanel        *tview.TextView
+	indicesPanelContainer *tview.Flex
+	indicesPanel          *tview.TextView
+	indicesSummary        *tview.TextView
 	metricsPanel        *tview.TextView
 )
 
@@ -668,7 +670,7 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics bool
 		if showNodes {
 			row = 2
 		}
-		grid.AddItem(indicesPanel, row, col, 1, 1, 0, 0, false)
+		grid.AddItem(indicesPanelContainer, row, col, 1, 1, 0, 0, false)
 		col++
 	}
 	if showMetrics {
@@ -786,7 +788,16 @@ func main() {
 						SetDynamicColors(true)
 
 	indicesPanel = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true)
+
+	indicesSummary = tview.NewTextView().
 		SetDynamicColors(true)
+
+	indicesPanelContainer = tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(indicesPanel, 0, 1, false).  // Scrollable indices list (takes remaining space)
+		AddItem(indicesSummary, 3, 0, false) // Fixed 3-line summary at bottom
 
 	metricsPanel = tview.NewTextView().
 		SetDynamicColors(true)
@@ -798,7 +809,7 @@ func main() {
 	grid.AddItem(header, 0, 0, 1, 3, 0, 0, false). // Header spans all columns
 							AddItem(nodesPanelContainer, 1, 0, 1, 3, 0, 0, false). // Nodes panel spans all columns
 							AddItem(rolesPanel, 2, 0, 1, 1, 0, 0, false).   // Roles panel in left column
-							AddItem(indicesPanel, 2, 1, 1, 1, 0, 0, false). // Indices panel in middle column
+							AddItem(indicesPanelContainer, 2, 1, 1, 1, 0, 0, false). // Indices panel in middle column
 							AddItem(metricsPanel, 2, 2, 1, 1, 0, 0, false)  // Metrics panel in right column
 
 	// Update function
@@ -1013,12 +1024,20 @@ func main() {
 
 		// Sort indices - active ones first, then alphabetically within each group
 		sort.Slice(indices, func(i, j int) bool {
-			// If one is active and the other isn't, active goes first
-			if (indices[i].indexingRate > 0) != (indices[j].indexingRate > 0) {
-				return indices[i].indexingRate > 0
+			// Non-hidden indices first (those not starting with ".")
+			iHidden := strings.HasPrefix(indices[i].index, ".")
+			jHidden := strings.HasPrefix(indices[j].index, ".")
+			if iHidden != jHidden {
+				return !iHidden // non-hidden comes first
 			}
-			// Within the same group (both active or both inactive), sort alphabetically
-			return indices[i].index < indices[j].index
+			// Within hidden/non-hidden, active indices first
+			iActive := indices[i].indexingRate > 0
+			jActive := indices[j].indexingRate > 0
+			if iActive != jActive {
+				return iActive // active comes first
+			}
+			// Within same activity status, sort by indexing rate (highest first)
+			return indices[i].indexingRate > indices[j].indexingRate
 		})
 
 		// Update index entries with compact format
@@ -1090,14 +1109,15 @@ func main() {
 			clusterRateStr = "[#444444]0/s"
 		}
 
-		// Display the totals with indexing rate
-		fmt.Fprintf(indicesPanel, "\n[#00ffff]Total Documents:[white] %s, [#00ffff]Total Size:[white] %s, [#00ffff]Indexing Rate:[white] %s\n",
+		// Display the totals with indexing rate in the fixed summary panel
+		indicesSummary.Clear()
+		fmt.Fprintf(indicesSummary, "[#00ffff]Total:[white] %s docs, %s, %s\n",
 			formatNumber(totalDocs),
 			bytesToHuman(totalSize),
 			clusterRateStr)
 
-		// Move shard stats to bottom of indices panel
-		fmt.Fprintf(indicesPanel, "\n[#00ffff]Shard Status:[white] Active: %d (%.1f%%), Primary: %d, Relocating: %d, Initializing: %d, Unassigned: %d\n",
+		// Shard stats in summary panel
+		fmt.Fprintf(indicesSummary, "[#00ffff]Shards:[white] %d active (%.0f%%), %d primary, %d reloc, %d init, %d unassigned\n",
 			clusterHealth.ActiveShards,
 			clusterHealth.ActiveShardsPercentAsNumber,
 			clusterHealth.ActivePrimaryShards,
