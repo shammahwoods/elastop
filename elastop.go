@@ -360,6 +360,20 @@ func formatNumber(n int) string {
 	return string(result)
 }
 
+// formatCompactNumber formats a number in compact form (1.2K, 1.2M, 1.2B)
+func formatCompactNumber(n int) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 func convertSizeFormat(sizeStr string) string {
 	var size float64
 	var unit string
@@ -552,10 +566,10 @@ func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	if maxLen <= 2 {
+	if maxLen <= 3 {
 		return s[:maxLen]
 	}
-	return s[:maxLen-2] + ".."
+	return s[:maxLen-3] + "..."
 }
 
 func getHealthColor(health string) string {
@@ -904,7 +918,7 @@ func main() {
 		}[clusterStats.Status]
 
 		// Get max lengths after fetching node and index info
-		maxNodeNameLen, maxIndexNameLen, _, maxIngestedLen := getMaxLengths(nodesInfo, indicesStats)
+		maxNodeNameLen, _, _, _ := getMaxLengths(nodesInfo, indicesStats)
 
 		// Update header with dynamic padding
 		header.Clear()
@@ -938,7 +952,7 @@ func main() {
 		// Update indices panel with dynamic width
 		indicesPanel.Clear()
 		fmt.Fprintf(indicesPanel, "[::b][#00ffff][[#ff5555]4[#00ffff]] Indices Information[::-]\n\n")
-		fmt.Fprint(indicesPanel, getIndicesPanelHeader(maxIndexNameLen, maxIngestedLen))
+		fmt.Fprint(indicesPanel, getIndicesPanelHeader())
 
 		// Update index entries with dynamic width
 		var indices []indexInfo
@@ -1007,7 +1021,7 @@ func main() {
 			return indices[i].index < indices[j].index
 		})
 
-		// Update index entries with dynamic width
+		// Update index entries with compact format
 		for _, idx := range indices {
 			writeIcon := "[#444444]⚪"
 			if idx.indexingRate > 0 {
@@ -1017,46 +1031,42 @@ func main() {
 			// Add data stream indicator
 			streamIndicator := " "
 			if isDataStream(idx.index, dataStreamResp) {
-				streamIndicator = "[#bd93f9]⚫[white]"
+				streamIndicator = "[#bd93f9]⚫"
 			}
 
-			// Calculate document changes with dynamic padding
-			activity := indexActivities[idx.index]
-			ingestedStr := ""
-			if activity != nil && activity.InitialDocsCount < idx.docs {
-				docChange := idx.docs - activity.InitialDocsCount
-				ingestedStr = fmt.Sprintf("[green]%-*s", maxIngestedLen, fmt.Sprintf("+%s", formatNumber(docChange)))
-			} else {
-				ingestedStr = fmt.Sprintf("%-*s", maxIngestedLen, "")
-			}
-
-			// Format indexing rate
-			rateStr := ""
+			// Format indexing rate (right-aligned, padding applied before color)
+			var rateVal string
+			var rateColor string
 			if idx.indexingRate > 0 {
+				rateColor = "#50fa7b"
 				if idx.indexingRate >= 1000 {
-					rateStr = fmt.Sprintf("[#50fa7b]%.1fk/s", idx.indexingRate/1000)
+					rateVal = fmt.Sprintf("%.1fk/s", idx.indexingRate/1000)
 				} else {
-					rateStr = fmt.Sprintf("[#50fa7b]%.1f/s", idx.indexingRate)
+					rateVal = fmt.Sprintf("%.1f/s", idx.indexingRate)
 				}
 			} else {
-				rateStr = "[#444444]0/s"
+				rateColor = "#444444"
+				rateVal = "0/s"
 			}
+			rateStr := fmt.Sprintf("[%s]%7s", rateColor, rateVal)
 
 			// Convert the size format before display
 			sizeStr := convertSizeFormat(idx.storeSize)
 
-			fmt.Fprintf(indicesPanel, "%s %s[%s]%-*s[white] [#444444]│[white] %13s [#444444]│[white] %5s [#444444]│[white] %6s [#444444]│[white] %8s [#444444]│[white] %-*s [#444444]│[white] %-8s\n",
+			// Combined shards/replicas
+			prStr := fmt.Sprintf("%s/%s", idx.priShards, idx.replicas)
+
+			// Truncate index name to 18 chars max
+			displayName := truncateString(idx.index, 18)
+
+			fmt.Fprintf(indicesPanel, "%s%s [%s]%-18s[white] %6s %5s %5s %s\n",
 				writeIcon,
 				streamIndicator,
 				getHealthColor(idx.health),
-				maxIndexNameLen,
-				idx.index,
-				formatNumber(idx.docs),
+				displayName,
+				formatCompactNumber(idx.docs),
 				sizeStr,
-				idx.priShards,
-				idx.replicas,
-				maxIngestedLen,
-				ingestedStr,
+				prStr,
 				rateStr)
 		}
 
@@ -1344,16 +1354,12 @@ func getNodesPanelHeader(maxNodeNameLen, maxTransportLen int) string {
 		"OS")
 }
 
-func getIndicesPanelHeader(maxIndexNameLen, maxIngestedLen int) string {
-	return fmt.Sprintf("   [::b] %-*s [#444444]│[#00ffff] %13s [#444444]│[#00ffff] %5s [#444444]│[#00ffff] %6s [#444444]│[#00ffff] %8s [#444444]│[#00ffff] %-*s [#444444][#00ffff] %-8s[white]\n",
-		maxIndexNameLen,
-		"Index Name",
-		"Documents",
+func getIndicesPanelHeader() string {
+	return fmt.Sprintf("   [::b][#00ffff]%-18s %6s %5s %5s %7s[white]\n",
+		"Index",
+		"Docs",
 		"Size",
-		"Shards",
-		"Replicas",
-		maxIngestedLen,
-		"Ingested",
+		"P/R",
 		"Rate")
 }
 
