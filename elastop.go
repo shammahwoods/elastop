@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -192,6 +193,71 @@ type GitHubRelease struct {
 	TagName string `json:"tag_name"`
 }
 
+// SecurityAlerts represents the response from security alerts aggregation query
+type SecurityAlerts struct {
+	Hits struct {
+		Total struct {
+			Value int `json:"value"`
+		} `json:"total"`
+	} `json:"hits"`
+	Aggregations struct {
+		BySeverity struct {
+			Buckets []struct {
+				Key      string `json:"key"`
+				DocCount int    `json:"doc_count"`
+			} `json:"buckets"`
+		} `json:"by_severity"`
+		ByHost struct {
+			Buckets []struct {
+				Key      string `json:"key"`
+				DocCount int    `json:"doc_count"`
+				HostInfo struct {
+					Hits struct {
+						Hits []struct {
+							Source struct {
+								Host struct {
+									Name string `json:"name"`
+									OS   struct {
+										Type string `json:"type"`
+									} `json:"os"`
+								} `json:"host"`
+								User struct {
+									Name string `json:"name"`
+								} `json:"user"`
+							} `json:"_source"`
+						} `json:"hits"`
+					} `json:"hits"`
+				} `json:"host_info"`
+				BySeverity struct {
+					Buckets []struct {
+						Key      string `json:"key"`
+						DocCount int    `json:"doc_count"`
+					} `json:"buckets"`
+				} `json:"by_severity"`
+			} `json:"buckets"`
+		} `json:"by_host"`
+		ByRule struct {
+			Buckets []struct {
+				Key      string `json:"key"`
+				DocCount int    `json:"doc_count"`
+				RuleInfo struct {
+					Hits struct {
+						Hits []struct {
+							Source struct {
+								Kibana struct {
+									Alert struct {
+										Severity string `json:"severity"`
+									} `json:"alert"`
+								} `json:"kibana"`
+							} `json:"_source"`
+						} `json:"hits"`
+					} `json:"hits"`
+				} `json:"rule_info"`
+			} `json:"buckets"`
+		} `json:"by_rule"`
+	} `json:"aggregations"`
+}
+
 var (
 	latestVersion string
 	versionCache  time.Time
@@ -204,17 +270,19 @@ var (
 	showRoles         = true
 	showIndices       = true
 	showMetrics       = true
+	showSecurity      = true
 	showHiddenIndices = false
 )
 
 var (
-	header              *tview.TextView
-	nodesPanelContainer *tview.Flex
-	rolesPanel          *tview.TextView
+	header                *tview.TextView
+	nodesPanelContainer   *tview.Flex
+	rolesPanel            *tview.TextView
 	indicesPanelContainer *tview.Flex
 	indicesPanel          *tview.TextView
 	indicesSummary        *tview.TextView
-	metricsPanel        *tview.TextView
+	metricsPanel          *tview.TextView
+	securityPanel         *tview.TextView
 )
 
 // MetricsHistory stores historical data points for sparklines
@@ -621,7 +689,10 @@ type indexInfo struct {
 	indexingRate float64
 }
 
-func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics bool) {
+// securityContentHeight holds the calculated height for the security panel
+var securityContentHeight = 9 // default minimum
+
+func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics, showSecurity bool) {
 	// Start with clean grid
 	grid.Clear()
 
@@ -636,25 +707,49 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics bool
 		visiblePanels++
 	}
 
-	// When only nodes panel is visible, use a single column layout
-	if showNodes && visiblePanels == 0 {
+	// When only nodes panel is visible (and maybe security), use a single column layout
+	if showNodes && visiblePanels == 0 && !showSecurity {
 		grid.SetRows(3, 0) // Header and nodes only
 		grid.SetColumns(0) // Single full-width column
 
-		// Add header and nodes panel
 		grid.AddItem(header, 0, 0, 1, 1, 0, 0, false)
 		grid.AddItem(nodesPanelContainer, 1, 0, 1, 1, 0, 0, false)
 		return
 	}
 
-	// Rest of the layout logic for when bottom panels are visible
-	if showNodes {
+	// Security panel height is calculated dynamically based on content
+	securityPanelHeight := securityContentHeight
+
+	if showNodes && visiblePanels == 0 && showSecurity {
+		grid.SetRows(3, 0, securityPanelHeight) // Header, nodes, security (fixed)
+		grid.SetColumns(0)
+
+		grid.AddItem(header, 0, 0, 1, 1, 0, 0, false)
+		grid.AddItem(nodesPanelContainer, 1, 0, 1, 1, 0, 0, false)
+		grid.AddItem(securityPanel, 2, 0, 1, 1, 0, 0, false)
+		return
+	}
+
+	// Configure rows based on what's visible
+	// Row 0: Header (3 lines)
+	// Row 1: Nodes (if visible)
+	// Row 2: Bottom panels (roles/indices/metrics)
+	// Row 3: Security (if visible) - fixed height
+	if showNodes && showSecurity {
+		grid.SetRows(3, 0, 0, securityPanelHeight) // Header, nodes, bottom panels, security
+	} else if showNodes {
 		grid.SetRows(3, 0, 0) // Header, nodes, bottom panels
+	} else if showSecurity {
+		grid.SetRows(3, 0, securityPanelHeight) // Header, bottom panels, security
 	} else {
 		grid.SetRows(3, 0) // Just header and bottom panels
 	}
 
 	// Configure columns based on visible panels
+	colCount := visiblePanels
+	if colCount == 0 {
+		colCount = 1
+	}
 	switch {
 	case visiblePanels == 3:
 		if showRoles {
@@ -668,40 +763,44 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics bool
 		}
 	case visiblePanels == 1:
 		grid.SetColumns(0)
+	case visiblePanels == 0:
+		grid.SetColumns(0)
 	}
 
 	// Always show header at top spanning all columns
-	grid.AddItem(header, 0, 0, 1, visiblePanels, 0, 0, false)
+	grid.AddItem(header, 0, 0, 1, colCount, 0, 0, false)
 
 	// Add nodes panel if visible, spanning all columns
 	if showNodes {
-		grid.AddItem(nodesPanelContainer, 1, 0, 1, visiblePanels, 0, 0, false)
+		grid.AddItem(nodesPanelContainer, 1, 0, 1, colCount, 0, 0, false)
 	}
 
 	// Add bottom panels in their respective positions
 	col := 0
+	bottomRow := 1
+	if showNodes {
+		bottomRow = 2
+	}
+
 	if showRoles {
-		row := 1
-		if showNodes {
-			row = 2
-		}
-		grid.AddItem(rolesPanel, row, col, 1, 1, 0, 0, false)
+		grid.AddItem(rolesPanel, bottomRow, col, 1, 1, 0, 0, false)
 		col++
 	}
 	if showIndices {
-		row := 1
-		if showNodes {
-			row = 2
-		}
-		grid.AddItem(indicesPanelContainer, row, col, 1, 1, 0, 0, false)
+		grid.AddItem(indicesPanelContainer, bottomRow, col, 1, 1, 0, 0, false)
 		col++
 	}
 	if showMetrics {
-		row := 1
-		if showNodes {
-			row = 2
+		grid.AddItem(metricsPanel, bottomRow, col, 1, 1, 0, 0, false)
+	}
+
+	// Add security panel on its own row at the bottom, spanning all columns
+	if showSecurity {
+		securityRow := bottomRow + 1
+		if visiblePanels == 0 {
+			securityRow = bottomRow
 		}
-		grid.AddItem(metricsPanel, row, col, 1, 1, 0, 0, false)
+		grid.AddItem(securityPanel, securityRow, 0, 1, colCount, 0, 0, false)
 	}
 }
 
@@ -825,15 +924,20 @@ func main() {
 	metricsPanel = tview.NewTextView().
 		SetDynamicColors(true)
 
+	securityPanel = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true)
+
 	// Initial layout
-	updateGridLayout(grid, showRoles, showIndices, showMetrics)
+	updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
 
 	// Add panels to grid
 	grid.AddItem(header, 0, 0, 1, 3, 0, 0, false). // Header spans all columns
 							AddItem(nodesPanelContainer, 1, 0, 1, 3, 0, 0, false). // Nodes panel spans all columns
 							AddItem(rolesPanel, 2, 0, 1, 1, 0, 0, false).   // Roles panel in left column
 							AddItem(indicesPanelContainer, 2, 1, 1, 1, 0, 0, false). // Indices panel in middle column
-							AddItem(metricsPanel, 2, 2, 1, 1, 0, 0, false)  // Metrics panel in right column
+							AddItem(metricsPanel, 2, 2, 1, 1, 0, 0, false). // Metrics panel in right column
+						AddItem(securityPanel, 3, 0, 1, 3, 0, 0, false) // Security panel spans all columns
 
 	// Update function
 	update := func() {
@@ -845,6 +949,40 @@ func main() {
 			if err != nil {
 				return err
 			}
+
+			// Set authentication
+			if apiKey != "" {
+				req.Header.Set("Authorization", fmt.Sprintf("ApiKey %s", apiKey))
+			} else if *user != "" && *password != "" {
+				req.SetBasicAuth(*user, *password)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			return json.Unmarshal(body, target)
+		}
+
+		// Helper function for POST requests (used for search queries)
+		makePostRequest := func(path string, requestBody []byte, target interface{}) error {
+			req, err := http.NewRequest("POST", baseURL+path, bytes.NewReader(requestBody))
+			if err != nil {
+				return err
+			}
+
+			req.Header.Set("Content-Type", "application/json")
 
 			// Set authentication
 			if apiKey != "" {
@@ -971,7 +1109,7 @@ func main() {
 			clusterStats.Nodes.Total,
 			clusterStats.Nodes.Successful,
 			clusterStats.Nodes.Failed)
-		fmt.Fprintf(header, "[#666666]Press 2-5 to toggle panels, 'h' to toggle hidden indices, 'q' to quit[white]\n")
+		fmt.Fprintf(header, "[#666666]Press 2-6 to toggle panels, 'h' to toggle hidden indices, 'q' to quit[white]\n")
 
 		// Update nodes panel with card-based layout
 		updateNodesPanel(nodesPanelContainer, nodesInfo, nodesStats, latestVer, app)
@@ -1273,6 +1411,69 @@ func main() {
 		if showRoles {
 			updateRolesPanel(rolesPanel, nodesInfo)
 		}
+
+		// Update security panel if visible
+		if showSecurity {
+			// Security alerts aggregation query
+			// Note: must_not excludes building block alerts (BBR) to match Kibana Security UI default view
+			securityQuery := []byte(`{
+				"size": 0,
+				"query": {
+					"bool": {
+						"filter": [
+							{ "term": { "kibana.alert.workflow_status": "open" } }
+						],
+						"must_not": [
+							{ "exists": { "field": "kibana.alert.building_block_type" } }
+						]
+					}
+				},
+				"aggs": {
+					"by_severity": {
+						"terms": { "field": "kibana.alert.severity", "size": 10 }
+					},
+					"by_host": {
+						"terms": { "field": "host.name", "size": 5 },
+						"aggs": {
+							"host_info": {
+								"top_hits": {
+									"size": 1,
+									"_source": ["host.os.type", "user.name"]
+								}
+							},
+							"by_severity": {
+								"terms": { "field": "kibana.alert.severity", "size": 10 }
+							}
+						}
+					},
+					"by_rule": {
+						"terms": { "field": "kibana.alert.rule.name", "size": 5 },
+						"aggs": {
+							"rule_info": {
+								"top_hits": {
+									"size": 1,
+									"_source": ["kibana.alert.severity"]
+								}
+							}
+						}
+					}
+				}
+			}`)
+
+			var securityAlerts SecurityAlerts
+			err := makePostRequest("/.alerts-security.alerts-*/_search", securityQuery, &securityAlerts)
+			if err != nil {
+				// Show error in security panel but don't fail the entire update
+				securityPanel.Clear()
+				fmt.Fprintf(securityPanel, "[::b][#00ffff][[#ff5555]6[#00ffff]] Security Alerts[::-]\n\n")
+				fmt.Fprintf(securityPanel, "[#666666]Unable to fetch security alerts: %v[white]\n", err)
+			} else {
+				if updateSecurityPanel(securityPanel, &securityAlerts) {
+					// Height changed, update grid layout
+					updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
+				}
+			}
+		}
 	}
 
 	// Set up periodic updates
@@ -1296,16 +1497,19 @@ func main() {
 				app.Stop()
 			case '2':
 				showNodes = !showNodes
-				updateGridLayout(grid, showRoles, showIndices, showMetrics)
+				updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
 			case '3':
 				showRoles = !showRoles
-				updateGridLayout(grid, showRoles, showIndices, showMetrics)
+				updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
 			case '4':
 				showIndices = !showIndices
-				updateGridLayout(grid, showRoles, showIndices, showMetrics)
+				updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
 			case '5':
 				showMetrics = !showMetrics
-				updateGridLayout(grid, showRoles, showIndices, showMetrics)
+				updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
+			case '6':
+				showSecurity = !showSecurity
+				updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
 			case 'h':
 				showHiddenIndices = !showHiddenIndices
 				// Let the regular update cycle handle it
@@ -1545,6 +1749,13 @@ func updateRolesPanel(rolesPanel *tview.TextView, nodesInfo NodesInfo) {
 	fmt.Fprintf(rolesPanel, "[#5555ff]⚫[white] Active indexing\n")
 	fmt.Fprintf(rolesPanel, "[#444444]⚪[white] No indexing\n")
 	fmt.Fprintf(rolesPanel, "[#bd93f9]⚫[white] Data stream\n")
+
+	// Add alert severity indicators
+	fmt.Fprintf(rolesPanel, "\n[::b][#00ffff]Alert Severity[::-]\n")
+	fmt.Fprintf(rolesPanel, "[#ff5555]●[white] Critical\n")
+	fmt.Fprintf(rolesPanel, "[#ffb86c]●[white] High\n")
+	fmt.Fprintf(rolesPanel, "[#f1fa8c]●[white] Medium\n")
+	fmt.Fprintf(rolesPanel, "[#8be9fd]●[white] Low\n")
 }
 
 func formatResourceSize(bytes int64) string {
@@ -1748,4 +1959,202 @@ func updateNodesPanel(
 		currentRow.AddItem(card, 0, 1, false)
 		cardCount++
 	}
+}
+
+// updateSecurityPanel renders the security alerts panel and returns true if height changed
+func updateSecurityPanel(panel *tview.TextView, alerts *SecurityAlerts) bool {
+	panel.Clear()
+
+	// Get severity counts
+	severityCounts := make(map[string]int)
+	for _, bucket := range alerts.Aggregations.BySeverity.Buckets {
+		severityCounts[bucket.Key] = bucket.DocCount
+	}
+
+	// Color mapping for severities
+	severityColors := map[string]string{
+		"critical": "#ff5555", // red
+		"high":     "#ffb86c", // orange
+		"medium":   "#f1fa8c", // yellow
+		"low":      "#8be9fd", // cyan
+	}
+
+	// Build header with Open summary on same line
+	headerLine := fmt.Sprintf("[::b][#00ffff][[#ff5555]6[#00ffff]] Security Alerts[::-] - [#00ffff]Open:[white] %d total   ", alerts.Hits.Total.Value)
+	for _, sev := range []string{"critical", "high", "medium", "low"} {
+		count := severityCounts[sev]
+		if count > 0 {
+			color := severityColors[sev]
+			headerLine += fmt.Sprintf("[%s]●[white] %s: %d  ", color, strings.Title(sev), count)
+		}
+	}
+	fmt.Fprintf(panel, "%s\n\n", headerLine)
+
+	// Collect host data
+	type hostData struct {
+		hostname       string
+		os             string
+		user           string
+		severityCounts map[string]int
+	}
+	var hosts []hostData
+	for i, bucket := range alerts.Aggregations.ByHost.Buckets {
+		if i >= 5 {
+			break
+		}
+		h := hostData{
+			hostname:       bucket.Key,
+			os:             "-",
+			user:           "-",
+			severityCounts: make(map[string]int),
+		}
+		if len(bucket.HostInfo.Hits.Hits) > 0 {
+			hit := bucket.HostInfo.Hits.Hits[0]
+			if hit.Source.Host.OS.Type != "" {
+				h.os = hit.Source.Host.OS.Type
+			}
+			if hit.Source.User.Name != "" {
+				h.user = hit.Source.User.Name
+			}
+		}
+		// Get severity counts for this host
+		for _, sevBucket := range bucket.BySeverity.Buckets {
+			h.severityCounts[sevBucket.Key] = sevBucket.DocCount
+		}
+		// Truncate
+		if len(h.hostname) > 18 {
+			h.hostname = h.hostname[:15] + "..."
+		}
+		if len(h.os) > 8 {
+			h.os = h.os[:8]
+		}
+		if len(h.user) > 12 {
+			h.user = h.user[:9] + "..."
+		}
+		hosts = append(hosts, h)
+	}
+
+	// Collect rule data
+	type ruleData struct {
+		name     string
+		count    int
+		severity string
+	}
+	var rules []ruleData
+	for i, bucket := range alerts.Aggregations.ByRule.Buckets {
+		if i >= 5 {
+			break
+		}
+		r := ruleData{
+			name:     bucket.Key,
+			count:    bucket.DocCount,
+			severity: "low", // default
+		}
+		// Get severity from rule_info
+		if len(bucket.RuleInfo.Hits.Hits) > 0 {
+			if sev := bucket.RuleInfo.Hits.Hits[0].Source.Kibana.Alert.Severity; sev != "" {
+				r.severity = sev
+			}
+		}
+		if len(r.name) > 42 {
+			r.name = r.name[:39] + "..."
+		}
+		rules = append(rules, r)
+	}
+
+	// Build left column lines (Top Hosts)
+	var leftLines []string
+
+	// Top Hosts header and column labels
+	leftLines = append(leftLines, "[::b][#00ffff]Top Hosts[::-]")
+	leftLines = append(leftLines, fmt.Sprintf("[#666666]  %-18s %-8s %-12s %s[white]", "Host", "OS", "User", "Alerts"))
+
+	// Host data rows
+	if len(hosts) == 0 {
+		leftLines = append(leftLines, "  [#666666]No host data[white]")
+	} else {
+		for _, h := range hosts {
+			// Build severity count string with colors (only show non-zero counts)
+			var sevParts []string
+			for _, sev := range []string{"critical", "high", "medium", "low"} {
+				if count := h.severityCounts[sev]; count > 0 {
+					color := severityColors[sev]
+					sevParts = append(sevParts, fmt.Sprintf("[%s]%d[white]", color, count))
+				}
+			}
+			sevStr := strings.Join(sevParts, "[#666666],[white] ")
+			if sevStr == "" {
+				sevStr = "[#666666]0[white]"
+			}
+
+			leftLines = append(leftLines, fmt.Sprintf("  %-18s [#bd93f9]%-8s[white] %-12s %s",
+				h.hostname, h.os, h.user, sevStr))
+		}
+	}
+
+	// Build right column lines (Top Rules)
+	var rightLines []string
+
+	// Top Rules header - starts at same row as Open
+	rightLines = append(rightLines, "[::b][#00ffff]Top Rules[::-]")
+	rightLines = append(rightLines, fmt.Sprintf("[#666666]  %-45s %5s[white]", "Rule Name", "Count"))
+
+	// Rule data rows
+	if len(rules) == 0 {
+		rightLines = append(rightLines, "  [#666666]No rule data[white]")
+	} else {
+		for _, r := range rules {
+			// Get color for severity
+			sevColor := severityColors[r.severity]
+			if sevColor == "" {
+				sevColor = "#666666"
+			}
+			rightLines = append(rightLines, fmt.Sprintf("  [%s]●[white] %-42s %5d", sevColor, r.name, r.count))
+		}
+	}
+
+	// Pad to same length
+	for len(leftLines) < len(rightLines) {
+		leftLines = append(leftLines, "")
+	}
+	for len(rightLines) < len(leftLines) {
+		rightLines = append(rightLines, "")
+	}
+
+	// Print side by side
+	const leftColWidth = 55
+	for i := 0; i < len(leftLines); i++ {
+		leftPart := leftLines[i]
+		rightPart := rightLines[i]
+
+		// Calculate visible length of leftPart for padding
+		visibleLen := 0
+		inTag := false
+		for _, ch := range leftPart {
+			if ch == '[' {
+				inTag = true
+			} else if ch == ']' && inTag {
+				inTag = false
+			} else if !inTag {
+				visibleLen++
+			}
+		}
+
+		// Pad left part to fixed width
+		padding := leftColWidth - visibleLen
+		if padding < 0 {
+			padding = 0
+		}
+
+		fmt.Fprintf(panel, "%s%s     %s\n", leftPart, strings.Repeat(" ", padding), rightPart)
+	}
+
+	// Calculate new content height: title (2 lines) + body lines
+	// Note: The last line doesn't need a trailing newline for display
+	newHeight := 2 + len(leftLines)
+	heightChanged := newHeight != securityContentHeight
+	if heightChanged {
+		securityContentHeight = newHeight
+	}
+	return heightChanged
 }
