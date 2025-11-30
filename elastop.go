@@ -386,6 +386,29 @@ func convertSizeFormat(sizeStr string) string {
 	return fmt.Sprintf("%d%s", int(size), unit)
 }
 
+// parseSizeToBytes converts a size string like "10gb" or "200mb" to bytes
+func parseSizeToBytes(sizeStr string) int64 {
+	var size float64
+	var unit string
+	fmt.Sscanf(sizeStr, "%f%s", &size, &unit)
+
+	unit = strings.ToLower(strings.TrimSuffix(unit, "b"))
+
+	multiplier := int64(1)
+	switch unit {
+	case "k", "kb":
+		multiplier = 1024
+	case "m", "mb":
+		multiplier = 1024 * 1024
+	case "g", "gb":
+		multiplier = 1024 * 1024 * 1024
+	case "t", "tb":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	}
+
+	return int64(size * float64(multiplier))
+}
+
 func getPercentageColor(percent float64) string {
 	switch {
 	case percent < 30:
@@ -1017,9 +1040,9 @@ func main() {
 			})
 		}
 
-		// Calculate total size
-		for _, node := range nodesStats.Nodes {
-			totalSize += node.FS.Total.TotalInBytes - node.FS.Total.AvailableInBytes
+		// Calculate total size from index store sizes
+		for _, idx := range indices {
+			totalSize += parseSizeToBytes(idx.storeSize)
 		}
 
 		// Sort indices - active ones first, then alphabetically within each group
