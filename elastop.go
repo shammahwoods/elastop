@@ -612,13 +612,16 @@ func formatNodeRoles(roles []string) string {
 		if nodeRoles[role] {
 			// Node has this role - use the role's color
 			result += fmt.Sprintf("[%s]%s[white]", roleColors[role], letter)
-		} else {
-			// Node doesn't have this role - use dark grey
-			result += fmt.Sprintf("[#444444]%s[white]", letter)
 		}
+		// Skip roles the node doesn't have
 	}
 
 	return result
+}
+
+// countActiveRoles returns the number of active roles for width calculation
+func countActiveRoles(roles []string) int {
+	return len(roles)
 }
 
 // truncateString truncates a string to maxLen, adding ".." if truncated
@@ -659,6 +662,9 @@ type indexInfo struct {
 // securityContentHeight holds the calculated height for the security panel
 var securityContentHeight = 9 // default minimum
 
+// nodesContentHeight holds the calculated height for the nodes panel
+var nodesContentHeight = 5 // default: title(2) + header(1) + 2 nodes
+
 func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics, showSecurity bool) {
 	// Start with clean grid
 	grid.Clear()
@@ -674,21 +680,22 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics, sho
 		visiblePanels++
 	}
 
+	// Panel heights are calculated dynamically based on content
+	nodesPanelHeight := nodesContentHeight
+	securityPanelHeight := securityContentHeight
+
 	// When only nodes panel is visible (and maybe security), use a single column layout
 	if showNodes && visiblePanels == 0 && !showSecurity {
-		grid.SetRows(3, 0) // Header and nodes only
-		grid.SetColumns(0) // Single full-width column
+		grid.SetRows(3, nodesPanelHeight) // Header and nodes only
+		grid.SetColumns(0)                // Single full-width column
 
 		grid.AddItem(header, 0, 0, 1, 1, 0, 0, false)
 		grid.AddItem(nodesPanel, 1, 0, 1, 1, 0, 0, false)
 		return
 	}
 
-	// Security panel height is calculated dynamically based on content
-	securityPanelHeight := securityContentHeight
-
 	if showNodes && visiblePanels == 0 && showSecurity {
-		grid.SetRows(3, 0, securityPanelHeight) // Header, nodes, security (fixed)
+		grid.SetRows(3, nodesPanelHeight, securityPanelHeight) // Header, nodes, security (fixed)
 		grid.SetColumns(0)
 
 		grid.AddItem(header, 0, 0, 1, 1, 0, 0, false)
@@ -699,13 +706,13 @@ func updateGridLayout(grid *tview.Grid, showRoles, showIndices, showMetrics, sho
 
 	// Configure rows based on what's visible
 	// Row 0: Header (3 lines)
-	// Row 1: Nodes (if visible)
+	// Row 1: Nodes (if visible) - dynamic height
 	// Row 2: Bottom panels (roles/indices/metrics)
 	// Row 3: Security (if visible) - fixed height
 	if showNodes && showSecurity {
-		grid.SetRows(3, 0, 0, securityPanelHeight) // Header, nodes, bottom panels, security
+		grid.SetRows(3, nodesPanelHeight, 0, securityPanelHeight) // Header, nodes, bottom panels, security
 	} else if showNodes {
-		grid.SetRows(3, 0, 0) // Header, nodes, bottom panels
+		grid.SetRows(3, nodesPanelHeight, 0) // Header, nodes, bottom panels
 	} else if showSecurity {
 		grid.SetRows(3, 0, securityPanelHeight) // Header, bottom panels, security
 	} else {
@@ -1079,8 +1086,11 @@ func main() {
 			clusterStats.Nodes.Failed)
 		fmt.Fprintf(header, "[#666666]Press 2-6 to toggle panels, 'h' to toggle hidden indices, 'q' to quit[white]\n")
 
-		// Update nodes panel with card-based layout
-		updateNodesPanel(nodesPanel, nodesInfo, nodesStats, latestVer)
+		// Update nodes panel with table-based layout
+		if updateNodesPanel(nodesPanel, nodesInfo, nodesStats, latestVer) {
+			// Height changed, update grid layout
+			updateGridLayout(grid, showRoles, showIndices, showMetrics, showSecurity)
+		}
 
 		// Get data streams info
 		var dataStreamResp DataStreamResponse
@@ -1554,9 +1564,9 @@ func getMaxLengths(nodesInfo NodesInfo, indicesStats IndexStats) (int, int, int,
 }
 
 func getNodesPanelHeader(widths map[string]int) string {
-	return fmt.Sprintf("[#666666]   %-*s %-13s %-*s %-*s %-*s %-*s %-*s %-*s %-*s %s[white]\n",
+	return fmt.Sprintf("[#666666]   %-*s %-*s %-*s %-*s %-*s %-*s %-*s %-*s %-*s %s[white]\n",
 		widths["name"], "Name",
-		"Roles",
+		widths["roles"], "Roles",
 		widths["transport"], "Transport",
 		widths["version"], "Version",
 		widths["cpu"], "CPU",
@@ -1746,6 +1756,7 @@ func formatResourceSize(bytes int64) string {
 type nodeRowData struct {
 	name         string
 	roles        string
+	rolesCount   int
 	transport    string
 	version      string
 	versionColor string
@@ -1770,12 +1781,13 @@ type nodeRowData struct {
 }
 
 // updateNodesPanel updates the nodes panel with table-based layout
+// Returns true if the panel height changed (requiring grid layout update)
 func updateNodesPanel(
 	panel *tview.TextView,
 	nodesInfo NodesInfo,
 	nodesStats NodesStats,
 	latestVer string,
-) {
+) bool {
 	panel.Clear()
 
 	// Sort nodes by name first
@@ -1790,6 +1802,7 @@ func updateNodesPanel(
 	// First pass: compute all data and calculate column widths
 	widths := map[string]int{
 		"name":      4, // minimum width for header "Name"
+		"roles":     5, // minimum width for header "Roles"
 		"transport": 9, // minimum width for header "Transport"
 		"version":   7, // minimum width for header "Version"
 		"cpu":       3, // minimum width for header "CPU"
@@ -1850,9 +1863,11 @@ func updateNodesPanel(
 		diskPlain := fmt.Sprintf("%s/%s %d%%", diskUsedStr, diskTotalStr, int(diskPercent))
 		uptimePlain := formatUptimePlain(nodeStatsData.JVM.UptimeInMillis)
 
+		rolesCount := countActiveRoles(nodeInfo.Roles)
 		row := nodeRowData{
 			name:         nodeInfo.Name,
 			roles:        formatNodeRoles(nodeInfo.Roles),
+			rolesCount:   rolesCount,
 			transport:    nodeInfo.TransportAddress,
 			version:      nodeInfo.Version,
 			versionColor: versionColor,
@@ -1880,6 +1895,9 @@ func updateNodesPanel(
 		// Update max widths
 		if len(row.name) > widths["name"] {
 			widths["name"] = len(row.name)
+		}
+		if row.rolesCount > widths["roles"] {
+			widths["roles"] = row.rolesCount
 		}
 		if len(row.transport) > widths["transport"] {
 			widths["transport"] = len(row.transport)
@@ -1935,9 +1953,12 @@ func updateNodesPanel(
 		uptimeStr := fmt.Sprintf("%s%s", formatUptime(row.uptimeMillis),
 			strings.Repeat(" ", widths["uptime"]-len(row.uptimePlain)))
 
+		rolesStr := fmt.Sprintf("%s%s", row.roles,
+			strings.Repeat(" ", widths["roles"]-row.rolesCount))
+
 		fmt.Fprintf(panel, "   [#5555ff]%-*s[white] %s %-*s [%s]%-*s[white] %s %s %s %s %s [#bd93f9]%s[white]\n",
 			widths["name"], row.name,
-			row.roles,
+			rolesStr,
 			widths["transport"], row.transport,
 			row.versionColor, widths["version"], row.version,
 			cpuStr,
@@ -1947,6 +1968,18 @@ func updateNodesPanel(
 			uptimeStr,
 			row.osName)
 	}
+
+	// Calculate new content height: title (2 lines) + header (1 line) + min(nodeCount, 5) rows
+	nodeCount := len(rows)
+	if nodeCount > 5 {
+		nodeCount = 5
+	}
+	newHeight := 2 + 1 + nodeCount // title + header + visible nodes
+	if newHeight != nodesContentHeight {
+		nodesContentHeight = newHeight
+		return true
+	}
+	return false
 }
 
 // formatUptimePlain returns uptime without color codes for width calculation
