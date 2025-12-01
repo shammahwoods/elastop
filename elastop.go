@@ -265,9 +265,10 @@ var (
 	showNodes         = true
 	showRoles         = true
 	showIndices       = true
-	showMetrics       = true
-	showSecurity      = true
-	showHiddenIndices = false
+	showMetrics        = true
+	showSecurity       = true
+	showHiddenIndices  = false
+	showPartialIndices = false
 )
 
 var (
@@ -1084,7 +1085,7 @@ func main() {
 			clusterStats.Nodes.Total,
 			clusterStats.Nodes.Successful,
 			clusterStats.Nodes.Failed)
-		fmt.Fprintf(header, "[#666666]Press 2-6 to toggle panels, 'h' to toggle hidden indices, 'q' to quit[white]\n")
+		fmt.Fprintf(header, "[#666666]Press 2-6 to toggle panels, 'h' hidden indices, 'p' partial indices, 'q' quit[white]\n")
 
 		// Update nodes panel with table-based layout
 		if updateNodesPanel(nodesPanel, nodesInfo, nodesStats, latestVer) {
@@ -1113,6 +1114,10 @@ func main() {
 		for _, index := range indicesStats {
 			// Skip hidden indices unless showHiddenIndices is true
 			if (!showHiddenIndices && strings.HasPrefix(index.Index, ".")) || index.DocsCount == "0" {
+				continue
+			}
+			// Skip partial indices unless showPartialIndices is true
+			if !showPartialIndices && strings.HasPrefix(index.Index, "partial-") {
 				continue
 			}
 			docs := 0
@@ -1491,6 +1496,9 @@ func main() {
 			case 'h':
 				showHiddenIndices = !showHiddenIndices
 				// Let the regular update cycle handle it
+			case 'p':
+				showPartialIndices = !showPartialIndices
+				// Let the regular update cycle handle it
 			}
 		}
 		return event
@@ -1535,7 +1543,15 @@ func getMaxLengths(nodesInfo NodesInfo, indicesStats IndexStats) (int, int, int,
 
 	// Get max index name length and calculate max ingested length
 	for _, index := range indicesStats {
-		if (showHiddenIndices || !strings.HasPrefix(index.Index, ".")) && index.DocsCount != "0" {
+		// Skip hidden indices unless showHiddenIndices is true
+		if !showHiddenIndices && strings.HasPrefix(index.Index, ".") {
+			continue
+		}
+		// Skip partial indices unless showPartialIndices is true
+		if !showPartialIndices && strings.HasPrefix(index.Index, "partial-") {
+			continue
+		}
+		if index.DocsCount != "0" {
 			if len(index.Index) > maxIndexNameLen {
 				maxIndexNameLen = len(index.Index)
 			}
